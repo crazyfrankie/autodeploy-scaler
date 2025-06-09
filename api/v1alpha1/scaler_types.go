@@ -27,9 +27,9 @@ import (
 type ScalerSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
-	StartTime  int64            `json:"start_time,omitempty"`
-	EndTime    int64            `json:"end_time,omitempty"`
-	Replicas   int              `json:"replicas,omitempty"`
+	StartTime  int              `json:"start_time,omitempty"`
+	EndTime    int              `json:"end_time,omitempty"`
+	Replicas   int32            `json:"replicas,omitempty"`
 	Deployment []DeploymentSpec `json:"deployment,omitempty"`
 }
 

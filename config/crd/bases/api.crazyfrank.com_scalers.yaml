@@ -49,15 +49,14 @@ spec:
                   type: object
                 type: array
               end_time:
-                format: int64
                 type: integer
               replicas:
+                format: int32
                 type: integer
               start_time:
                 description: |-
                   INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
                   Important: Run "make" to regenerate code after modifying this file
-                format: int64
                 type: integer
             type: object
           status:

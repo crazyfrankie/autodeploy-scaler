@@ -18,6 +18,10 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	v1 "k8s.io/api/apps/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -25,6 +29,10 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	apiv1alpha1 "github.com/crazyfrankie/autodeploy-scaler/api/v1alpha1"
+)
+
+var (
+	logger = logf.Log.WithName("scaler_controller")
 )
 
 // ScalerReconciler reconciles a Scaler object
@@ -47,11 +55,49 @@ type ScalerReconciler struct {
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.21.0/pkg/reconcile
 func (r *ScalerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = logf.FromContext(ctx)
+	log := logger.WithValues("Request.Namespace", req.Namespace, "Request.Name", req.Name)
+	log.Info("Reconcile called")
 
-	// TODO(user): your logic here
+	// create a scaler object
+	scaler := &apiv1alpha1.Scaler{}
+	err := r.Get(ctx, req.NamespacedName, scaler)
+	if err != nil {
+		// if not found scaler object, use IgnoreNotFound to leave the process uninterrupted
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
 
-	return ctrl.Result{}, nil
+	startTime := scaler.Spec.StartTime
+	endTime := scaler.Spec.EndTime
+	replicas := scaler.Spec.Replicas
+
+	currentHour := time.Now().Local().Hour()
+	log.Info(fmt.Sprintf("Current Time: %d", currentHour))
+
+	// from startTime end to endTime
+	if currentHour >= startTime && currentHour < endTime {
+		for _, deploy := range scaler.Spec.Deployment {
+			deployment := &v1.Deployment{}
+			err := r.Get(ctx, types.NamespacedName{
+				Namespace: deploy.Namespace,
+				Name:      deploy.Name,
+			}, deployment)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+
+			// Determine if the number of replicas in a cluster deployment is
+			// equal to the required number of replicas in a cluster deployment.
+			if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != replicas {
+				*deployment.Spec.Replicas = replicas
+				err := r.Update(ctx, deployment)
+				if err != nil {
+					return ctrl.Result{}, err
+				}
+			}
+		}
+	}
+
+	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
