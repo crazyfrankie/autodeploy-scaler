@@ -258,7 +258,6 @@ var _ = Describe("Manager", Ordered, func() {
 
 		// +kubebuilder:scaffold:e2e-webhooks-checks
 
-		// TODO: Customize the e2e test suite with scenarios specific to your project.
 		// Consider applying sample/CR(s) and check their status and/or verifying
 		// the reconciliation by using the metrics, i.e.:
 		// metricsOutput := getMetricsOutput()
@@ -266,6 +265,390 @@ var _ = Describe("Manager", Ordered, func() {
 		//    fmt.Sprintf(`controller_runtime_reconcile_total{controller="%s",result="success"} 1`,
 		//    strings.ToLower(<Kind>),
 		// ))
+
+		It("should create and manage Scaler resources successfully", func() {
+			By("creating a test deployment")
+			testDeployment := `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-deployment
+  namespace: default
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: test-app
+  template:
+    metadata:
+      labels:
+        app: test-app
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:latest
+        ports:
+        - containerPort: 80
+`
+			deploymentFile := "/tmp/test-deployment.yaml"
+			err := os.WriteFile(deploymentFile, []byte(testDeployment), 0644)
+			Expect(err).NotTo(HaveOccurred())
+
+			cmd := exec.Command("kubectl", "apply", "-f", deploymentFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for deployment to be ready")
+			Eventually(func() bool {
+				cmd := exec.Command("kubectl", "get", "deployment", "test-deployment", "-o", "jsonpath={.status.readyReplicas}")
+				output, err := utils.Run(cmd)
+				if err != nil {
+					return false
+				}
+				return output == "2"
+			}, 2*time.Minute, 5*time.Second).Should(BeTrue())
+
+			By("creating a Scaler resource")
+			// Get current hour and set scaling window to test immediate scaling
+			currentTime := time.Now()
+			currentHour := currentTime.Hour()
+			startTime := currentHour
+			endTime := (currentHour + 1) % 24
+
+			scalerYAML := fmt.Sprintf(`
+apiVersion: api.crazyfrank.com/v1alpha1
+kind: Scaler
+metadata:
+  name: test-scaler
+  namespace: default
+spec:
+  startTime: %d
+  endTime: %d
+  replicas: 5
+  deployment:
+  - name: test-deployment
+    namespace: default
+`, startTime, endTime)
+
+			scalerFile := "/tmp/test-scaler.yaml"
+			err = os.WriteFile(scalerFile, []byte(scalerYAML), 0644)
+			Expect(err).NotTo(HaveOccurred())
+
+			cmd = exec.Command("kubectl", "apply", "-f", scalerFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying scaler status becomes SCALED")
+			Eventually(func() string {
+				cmd := exec.Command("kubectl", "get", "scaler", "test-scaler", "-o", "jsonpath={.status.status}")
+				output, err := utils.Run(cmd)
+				if err != nil {
+					return ""
+				}
+				return output
+			}, 2*time.Minute, 5*time.Second).Should(Equal("Scaled"))
+
+			By("verifying deployment is scaled to target replicas")
+			Eventually(func() string {
+				cmd := exec.Command("kubectl", "get", "deployment", "test-deployment", "-o", "jsonpath={.spec.replicas}")
+				output, err := utils.Run(cmd)
+				if err != nil {
+					return ""
+				}
+				return output
+			}, 2*time.Minute, 5*time.Second).Should(Equal("5"))
+
+			By("verifying scaler has finalizer")
+			cmd = exec.Command("kubectl", "get", "scaler", "test-scaler", "-o", "jsonpath={.metadata.finalizers}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(ContainSubstring("scalers.api.crazyfrank.com/finalizer"))
+
+			By("verifying scaler has annotations with original deployment info")
+			cmd = exec.Command("kubectl", "get", "scaler", "test-scaler", "-o", "jsonpath={.metadata.annotations}")
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(ContainSubstring("test-deployment"))
+
+			By("cleaning up test resources")
+			cmd = exec.Command("kubectl", "delete", "scaler", "test-scaler")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying deployment is restored to original replicas after scaler deletion")
+			Eventually(func() string {
+				cmd := exec.Command("kubectl", "get", "deployment", "test-deployment", "-o", "jsonpath={.spec.replicas}")
+				output, err := utils.Run(cmd)
+				if err != nil {
+					return ""
+				}
+				return output
+			}, 2*time.Minute, 5*time.Second).Should(Equal("2"))
+
+			By("verifying scaler is completely deleted")
+			Eventually(func() bool {
+				cmd := exec.Command("kubectl", "get", "scaler", "test-scaler")
+				_, err := utils.Run(cmd)
+				return err != nil // Should return error when not found
+			}, 2*time.Minute, 5*time.Second).Should(BeTrue())
+
+			cmd = exec.Command("kubectl", "delete", "deployment", "test-deployment")
+			_, _ = utils.Run(cmd)
+		})
+
+		It("should handle multiple deployments correctly", func() {
+			By("creating multiple test deployments")
+			deployment1YAML := `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-deployment-1
+  namespace: default
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: test-app-1
+  template:
+    metadata:
+      labels:
+        app: test-app-1
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:latest
+`
+
+			deployment2YAML := `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-deployment-2
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: test-app-2
+  template:
+    metadata:
+      labels:
+        app: test-app-2
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:latest
+`
+
+			deployment1File := "/tmp/test-deployment-1.yaml"
+			deployment2File := "/tmp/test-deployment-2.yaml"
+
+			err := os.WriteFile(deployment1File, []byte(deployment1YAML), 0644)
+			Expect(err).NotTo(HaveOccurred())
+			err = os.WriteFile(deployment2File, []byte(deployment2YAML), 0644)
+			Expect(err).NotTo(HaveOccurred())
+
+			cmd := exec.Command("kubectl", "apply", "-f", deployment1File)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			cmd = exec.Command("kubectl", "apply", "-f", deployment2File)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for deployments to be ready")
+			Eventually(func() bool {
+				cmd := exec.Command("kubectl", "get", "deployment", "test-deployment-1", "-o", "jsonpath={.status.readyReplicas}")
+				output, err := utils.Run(cmd)
+				if err != nil {
+					return false
+				}
+				return output == "3"
+			}, 2*time.Minute, 5*time.Second).Should(BeTrue())
+
+			Eventually(func() bool {
+				cmd := exec.Command("kubectl", "get", "deployment", "test-deployment-2", "-o", "jsonpath={.status.readyReplicas}")
+				output, err := utils.Run(cmd)
+				if err != nil {
+					return false
+				}
+				return output == "1"
+			}, 2*time.Minute, 5*time.Second).Should(BeTrue())
+
+			By("creating a Scaler for multiple deployments")
+			currentTime := time.Now()
+			currentHour := currentTime.Hour()
+			startTime := currentHour
+			endTime := (currentHour + 1) % 24
+
+			multiScalerYAML := fmt.Sprintf(`
+apiVersion: api.crazyfrank.com/v1alpha1
+kind: Scaler
+metadata:
+  name: multi-scaler
+  namespace: default
+spec:
+  startTime: %d
+  endTime: %d
+  replicas: 4
+  deployment:
+  - name: test-deployment-1
+    namespace: default
+  - name: test-deployment-2
+    namespace: default
+`, startTime, endTime)
+
+			multiScalerFile := "/tmp/multi-scaler.yaml"
+			err = os.WriteFile(multiScalerFile, []byte(multiScalerYAML), 0644)
+			Expect(err).NotTo(HaveOccurred())
+
+			cmd = exec.Command("kubectl", "apply", "-f", multiScalerFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying both deployments are scaled")
+			Eventually(func() string {
+				cmd := exec.Command("kubectl", "get", "deployment", "test-deployment-1", "-o", "jsonpath={.spec.replicas}")
+				output, err := utils.Run(cmd)
+				if err != nil {
+					return ""
+				}
+				return output
+			}, 2*time.Minute, 5*time.Second).Should(Equal("4"))
+
+			Eventually(func() string {
+				cmd := exec.Command("kubectl", "get", "deployment", "test-deployment-2", "-o", "jsonpath={.spec.replicas}")
+				output, err := utils.Run(cmd)
+				if err != nil {
+					return ""
+				}
+				return output
+			}, 2*time.Minute, 5*time.Second).Should(Equal("4"))
+
+			By("cleaning up resources")
+			cmd = exec.Command("kubectl", "delete", "scaler", "multi-scaler")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying deployments are restored to original replicas")
+			Eventually(func() string {
+				cmd := exec.Command("kubectl", "get", "deployment", "test-deployment-1", "-o", "jsonpath={.spec.replicas}")
+				output, err := utils.Run(cmd)
+				if err != nil {
+					return ""
+				}
+				return output
+			}, 2*time.Minute, 5*time.Second).Should(Equal("3"))
+
+			Eventually(func() string {
+				cmd := exec.Command("kubectl", "get", "deployment", "test-deployment-2", "-o", "jsonpath={.spec.replicas}")
+				output, err := utils.Run(cmd)
+				if err != nil {
+					return ""
+				}
+				return output
+			}, 2*time.Minute, 5*time.Second).Should(Equal("1"))
+
+			cmd = exec.Command("kubectl", "delete", "deployment", "test-deployment-1")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "deployment", "test-deployment-2")
+			_, _ = utils.Run(cmd)
+		})
+
+		It("should not scale when outside time window", func() {
+			By("creating a test deployment")
+			testDeployment := `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-deployment-out-window
+  namespace: default
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: test-app-out-window
+  template:
+    metadata:
+      labels:
+        app: test-app-out-window
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:latest
+`
+			deploymentFile := "/tmp/test-deployment-out-window.yaml"
+			err := os.WriteFile(deploymentFile, []byte(testDeployment), 0644)
+			Expect(err).NotTo(HaveOccurred())
+
+			cmd := exec.Command("kubectl", "apply", "-f", deploymentFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("creating a Scaler with time window that excludes current time")
+			currentTime := time.Now()
+			currentHour := currentTime.Hour()
+			// Set window to be outside current hour
+			startTime := (currentHour + 2) % 24
+			endTime := (currentHour + 3) % 24
+
+			scalerYAML := fmt.Sprintf(`
+apiVersion: api.crazyfrank.com/v1alpha1
+kind: Scaler
+metadata:
+  name: out-window-scaler
+  namespace: default
+spec:
+  startTime: %d
+  endTime: %d
+  replicas: 5
+  deployment:
+  - name: test-deployment-out-window
+    namespace: default
+`, startTime, endTime)
+
+			scalerFile := "/tmp/out-window-scaler.yaml"
+			err = os.WriteFile(scalerFile, []byte(scalerYAML), 0644)
+			Expect(err).NotTo(HaveOccurred())
+
+			cmd = exec.Command("kubectl", "apply", "-f", scalerFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying scaler status becomes PENDING")
+			Eventually(func() string {
+				cmd := exec.Command("kubectl", "get", "scaler", "out-window-scaler", "-o", "jsonpath={.status.status}")
+				output, err := utils.Run(cmd)
+				if err != nil {
+					return ""
+				}
+				return output
+			}, 1*time.Minute, 5*time.Second).Should(Equal("Pending"))
+
+			By("verifying deployment maintains original replicas")
+			Consistently(func() string {
+				cmd := exec.Command("kubectl", "get", "deployment", "test-deployment-out-window", "-o", "jsonpath={.spec.replicas}")
+				output, err := utils.Run(cmd)
+				if err != nil {
+					return ""
+				}
+				return output
+			}, 30*time.Second, 5*time.Second).Should(Equal("2"))
+
+			By("cleaning up resources")
+			cmd = exec.Command("kubectl", "delete", "scaler", "out-window-scaler")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "deployment", "test-deployment-out-window")
+			_, _ = utils.Run(cmd)
+		})
+
+		It("should verify metrics contain scaler controller information", func() {
+			By("checking controller metrics for scaler reconciliation")
+			metricsOutput := getMetricsOutput()
+
+			Expect(metricsOutput).To(ContainSubstring("controller_runtime_reconcile_total"))
+			Expect(metricsOutput).To(ContainSubstring("controller=\"scaler\""))
+		})
 	})
 })
 
