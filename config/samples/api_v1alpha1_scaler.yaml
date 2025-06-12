@@ -6,4 +6,11 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: scaler-sample
 spec:
-  # TODO(user): Add fields here
+  startTime: 15
+  endTime: 20
+  replicas: 3
+  deployment:
+    - name: app1
+      namespace: default
+    - name: app2
+      namespace: default

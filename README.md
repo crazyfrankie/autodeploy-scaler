@@ -1,8 +1,31 @@
 # autodelpoy-scaler
-// TODO(user): Add simple overview of use/purpose
+This is a CRD that supports scaling up and down over time for certain Pods in a Kubernetes cluster.
 
 ## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+In the business some Pods may need to expand and shrink within a specific time period due to sudden changes in traffic, 
+the following CRD implementation can be taken, specifically, the example usage:
+```yaml
+apiVersion: api.crazyfrank.com/v1alpha1
+kind: Scaler
+metadata:
+  labels:
+    app.kubernetes.io/name: autodelpoy-scaler
+    app.kubernetes.io/managed-by: kustomize
+  name: scaler-sample
+spec:
+  startTime: 15
+  endTime: 20
+  replicas: 3
+  deployment:
+    - name: app1
+      namespace: default
+    - name: app2
+      namespace: default
+```
+- `startTime`: The start time of the scale operation.
+- `endTime`: represents the end time of the scale operation.
+- `replicas`: represents the number of replicas after the scale.
+- `deployments`: represents the Controllers to be manipulated.
 
 ## Getting Started
 
@@ -32,7 +55,7 @@ make install
 **Deploy the Manager to the cluster with the image specified by `IMG`:**
 
 ```sh
-make deploy IMG=<some-registry>/autodelpoy-scaler:tag
+make deploy IMG=ghcr.io/crazyfrankie/autodelpoy-scaler:tag
 ```
 
 > **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
